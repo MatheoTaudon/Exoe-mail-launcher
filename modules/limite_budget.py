@@ -16,67 +16,57 @@ def app():
         st.error(f"Erreur de lecture du fichier BDD.xlsx : {e}")
         return
 
+    if "suivi_envois" not in st.session_state:
+        st.session_state["suivi_envois"] = []
+
+    # Sélection du client
+    st.subheader("Sélection du client")
     asset_managers = sorted(df['Asset Manager'].dropna().unique())
-    selected_am = st.selectbox("Sélectionnez un Asset Manager", asset_managers)
+    selected_am = st.selectbox("Asset Manager", asset_managers)
+    filtered_am = df[df['Asset Manager'] == selected_am]
 
-    if not selected_am:
-        return
+    # Sélection des brokers
+    all_brokers = sorted(filtered_am['Broker'].dropna().unique())
+    broker_options = ["-- Tous les brokers --"] + all_brokers
+    selected_brokers_raw = st.multiselect("Brokers", broker_options)
+    selected_brokers = all_brokers if "-- Tous les brokers --" in selected_brokers_raw else selected_brokers_raw
+    final_df = filtered_am[filtered_am['Broker'].isin(selected_brokers)]
 
-    for col in ["CSA EQ", "Recherche EQ", "CSA ALGO", "Recherche ALGO", "CSA ETF", "Recherche ETF"]:
-        if col not in df.columns:
-            df[col] = 0.0
-        else:
-            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
-
-    filtered_df = df[df['Asset Manager'] == selected_am]
-
-    produit_mapping = {
+    # Produits concernés
+    st.subheader("Produits concernés")
+    products = {
         "Equities": ("CSA EQ", "Recherche EQ", "Mail Broker EQ"),
         "ALGO": ("CSA ALGO", "Recherche ALGO", "Mail Broker ALGO"),
         "ETF": ("CSA ETF", "Recherche ETF", "Mail Broker ETF")
     }
+    selected_products = [p for p in products if st.checkbox(p)]
 
-    email_map = defaultdict(lambda: {"produits": [], "brokers": set()})
+    if not selected_products:
+        st.warning("Veuillez sélectionner au moins un produit.")
+        return
 
-    for _, row in filtered_df.iterrows():
+    email_map = defaultdict(lambda: {"products": defaultdict(list), "brokers": set()})
+
+    for _, row in final_df.iterrows():
         broker = row.get("Broker", "")
-        for produit, (col_csa, col_rech, col_mail) in produit_mapping.items():
-            csa = float(row.get(col_csa, 0))
-            rech = float(row.get(col_rech, 0))
+        for product in selected_products:
+            csa_col, rech_col, mail_col = products[product]
+            csa = float(row.get(csa_col, 0))
+            rech = float(row.get(rech_col, 0))
             if csa == 0 and rech == 0:
                 continue
-            emails = [e.strip() for e in str(row.get(col_mail, "")).split(";") if e.strip()]
+            emails = [e.strip() for e in str(row.get(mail_col, "")).split(";") if e.strip()]
             for email in emails:
-                email_map[email]["produits"].append((produit, csa, rech))
+                email_map[email]["products"][product].append((broker, csa, rech))
                 email_map[email]["brokers"].add(broker)
 
     if not email_map:
-        st.info("✅ Aucun budget recherche à notifier pour cet Asset Manager.")
+        st.info("✅ Aucun budget recherche à notifier avec les filtres sélectionnés.")
         return
 
-    st.subheader("Paramètres de l'email")
-    default_subject =  f"Limite budget de recherche {selected_am}"
-    user_subject_template = st.text_input("Objet de l'email (modifiable)", value=default_subject)
-
-    default_body = """
-Bonjour,
-
-{message_details}
-
-Merci d'arrêter la collecte de recherche et CSA jusqu'à nouvel ordre.
-
-Cordialement,
-
-TRADING Exoé,
-6, rue de Lisbonne,
-75008 Paris,
-Equities : +33(1) 80 20 65 41,
-trading@exoe.fr,
-Taux : +33(1) 80 20 65 70,
-fixedincome@exoe.fr
-www.exoe.fr
-    """
-    user_template = st.text_area("Modèle de message (modifiable)", value=default_body.strip(), height=300)
+    st.subheader("Objet de l'email")
+    default_subject = f"Limite budget de recherche {selected_am}"
+    user_subject = st.text_input("Objet de l'email", value=default_subject)
 
     if st.button("📄 Prévisualiser les emails"):
         previews = []
@@ -84,25 +74,39 @@ www.exoe.fr
         for email, data in email_map.items():
             lignes = []
             produit_labels = []
-            for produit, csa, rech in data["produits"]:
-                produit_labels.append(produit)
-                if csa > 0 and rech > 0:
-                    lignes.append(f"• {produit} : CSA de {csa} bps et Recherche de {rech} bps")
-                elif csa > 0:
-                    lignes.append(f"• {produit} : CSA de {csa} bps")
-                elif rech > 0:
-                    lignes.append(f"• {produit} : Recherche de {rech} bps")
+            for product, values in data["products"].items():
+                produit_labels.append(product)
+                lignes.append(f"\n{product}")
+                for broker, csa, rech in values:
+                    if csa > 0 and rech > 0:
+                        lignes.append(f"• {broker} : CSA de {csa} bps et Recherche de {rech} bps")
+                    elif csa > 0:
+                        lignes.append(f"• {broker} : CSA de {csa} bps")
+                    elif rech > 0:
+                        lignes.append(f"• {broker} : Recherche de {rech} bps")
 
             broker_str = ", ".join(sorted(data["brokers"]))
-            message_details = f"Nous vous informons que le budget recherche de {selected_am} pour {broker_str} a atteint sa limite sur les produits suivants :\n\n" + "\n".join(lignes)
-            body = user_template.replace("{message_details}", message_details)
-            subject = user_subject_template.replace("{asset_manager}", selected_am)
+            message = "\n".join([
+                "Bonjour,\n",
+                f"Nous vous informons que le budget recherche de {selected_am} pour {broker_str} a atteint sa limite sur les produits suivants :",
+                "\n".join(lignes),
+                "\nMerci d'arrêter la collecte de recherche et CSA jusqu'à nouvel ordre.\n",
+                "Cordialement,\n\n",
+                "TRADING Exoé",
+                "6, rue de Lisbonne",
+                "75008 Paris",
+                "Equities : +33(1) 80 20 65 41",
+                "trading@exoe.fr",
+                "Taux : +33(1) 80 20 65 70",
+                "fixedincome@exoe.fr",
+                "www.exoe.fr"
+            ])
 
             previews.append({
                 "broker": broker_str,
                 "emails": email,
-                "body": body,
-                "subject": subject,
+                "body": message,
+                "subject": user_subject,
                 "produit_str": ", ".join(sorted(set(produit_labels)))
             })
 
@@ -114,7 +118,7 @@ www.exoe.fr
 
         for i, p in enumerate(st.session_state["previews"]):
             st.subheader(f"Broker : {p['broker']} | Produits : {p['produit_str']}")
-            st.markdown(f"Destinataires : {email}")
+            st.markdown(f"Destinataires : {p['emails']}")
             st.text_area("", value=p['body'], height=300, key=f"preview_{i}")
 
         if st.button("📨 Envoyer les emails"):
@@ -136,6 +140,10 @@ www.exoe.fr
 
             st.session_state["suivi_envois"] = historique
             st.success("✅ Tous les emails ont été envoyés.")
+
+    if st.session_state.get("suivi_envois"):
+        st.markdown("---")
+        telecharger_recapitulatif(st.session_state["suivi_envois"])
 
     if st.session_state.get("suivi_envois"):
         st.markdown("---")
